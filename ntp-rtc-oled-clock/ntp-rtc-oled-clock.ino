@@ -21,7 +21,7 @@ DS3231 rtc;
 
 // how often to update rtc with ntp, in seconds
 #define EXPIRES_RTCFROMNTP (24 * 60 * 60 / 3)
-int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
+int rtcExpiration = 0;
 
 // oled display size
 #define SCREEN_WIDTH 128
@@ -44,7 +44,7 @@ void setup()
     Serial.println(F("SSD1306 allocation failed"));
 
     // stall here
-    for(;;); 
+    for (;;);
   }
 
   //display.setRotation(2);
@@ -54,11 +54,17 @@ void loop()
 {
   bool err = false;
 
-  // update RTC from NTP?
+  // rtc in valid state?
+  if ( !isRTCValid() ) {
+    // force rtc to be set from ntp
+    rtcExpiration = EXPIRES_RTCFROMNTP + 1;
+  }
+
+  // update rtc from ntp?
   if ( rtcExpiration > EXPIRES_RTCFROMNTP ) {
     if ( setRTCFromNTP() ) {
       // only reset on success
-      // so we can retry next time thru if there was an error
+      // we will retry next time thru if there was an error
       rtcExpiration = 0;
     } else {
       // show error status on display
@@ -116,6 +122,20 @@ bool setRTCFromNTP()
   // don't keep persistent connection
   WiFi.disconnect(true);
 
+  // return based on whether rtc is now valid
+  if ( isRTCValid() ) {
+    return true;
+  }
+
+  Serial.println(F("RTC invalid"));
+  return false;
+}
+
+// return true if RTC appears to be in a valid state
+bool isRTCValid() {
+  if ( rtc.getDate() > 31 ) {
+    return false;
+  }
   return true;
 }
 
