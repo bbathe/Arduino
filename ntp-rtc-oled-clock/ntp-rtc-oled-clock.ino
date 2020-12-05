@@ -21,7 +21,7 @@ DS3231 rtc;
 
 // how often to update rtc with ntp, in seconds
 #define EXPIRES_RTCFROMNTP (24 * 60 * 60 / 3)
-int rtcExpiration = 0;
+int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
 
 // oled display size
 #define SCREEN_WIDTH 128
