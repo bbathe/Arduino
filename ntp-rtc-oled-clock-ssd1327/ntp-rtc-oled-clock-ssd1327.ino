@@ -97,6 +97,7 @@ bool setRTCFromNTP()
   // connect to wifi to reach ntp server
   int tries;
   WiFi.begin(wifiSSID, wifiPwd);
+  WiFi.setHostname("stnclk");
   while ( WiFi.status() != WL_CONNECTED ) {
     tries++;
     if ( tries > 30 ) {
