@@ -19,10 +19,6 @@ const char* ntpServer = "pool.ntp.org";
 // real time clock so we are't slamming the ntp server
 DS3231 rtc;
 
-// how often to update rtc with ntp, in seconds
-#define EXPIRES_RTCFROMNTP (24 * 60 * 60 / 3)
-int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
-
 // ESP32 to OLED SPI
 //
 // VCC of OLED -> Vcc
@@ -37,6 +33,15 @@ int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
 #define OLED_CS    5
 #define OLED_RESET -1
 Adafruit_SSD1327 display(128, 128, &SPI, OLED_DC, OLED_RESET, OLED_CS);
+
+// how often to update rtc with ntp, in seconds
+#define EXPIRES_RTCFROMNTP (24 * 60 * 60 / 3)
+
+// in error state?
+volatile bool err = false;
+
+// guard access to the RTC
+SemaphoreHandle_t xRTCMutex = NULL;
 
 
 void setup()
@@ -55,38 +60,82 @@ void setup()
   }
 
   display.setRotation(2);
+
+  // create RTC mutex semaphore
+  xRTCMutex = xSemaphoreCreateMutex();
+  if ( xRTCMutex != NULL ) {
+    xTaskCreatePinnedToCore(core0Loop, "UpdateRTC", 10000, (void*)NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(core1Loop, "DisplayClock", 10000, (void*)NULL, 1, NULL, 1);
+  } else {
+    Serial.println(F("rtc mutex create failed"));
+
+    // stall here
+    while ( 1 ) yield();
+  }
+}
+
+// the first core is responsible for keeping the RTC in-sync with NTP
+void core0Loop(void* p)
+{
+  int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
+
+
+  while ( 1 ) {
+    // update rtc from ntp?
+    if ( rtcExpiration > EXPIRES_RTCFROMNTP ) {
+      if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
+        if ( setRTCFromNTP() ) {
+          // error status failed
+          err = false;
+
+          // we will retry next time thru if there was an error
+          rtcExpiration = 0;
+        } else {
+          // error status success
+          err = true;
+        }
+
+        xSemaphoreGive(xRTCMutex);
+      }
+    }
+
+    // track when to update rtc from ntp
+    rtcExpiration++;
+
+    // done for a while
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// the second core is responsible for displaying the current time from the RTC
+void core1Loop(void* p)
+{
+  int lastMinute = 61;
+
+
+  while ( 1 ) {
+    if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
+      // only update the display if the minute value has changed
+      int m = rtc.getMinute();
+      if ( lastMinute != m ) {
+        // update
+        showTime(err);
+
+        // ready for next check
+        lastMinute = m;
+      }
+
+      xSemaphoreGive(xRTCMutex);
+    }
+
+    // done for a while
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
 }
 
 void loop()
 {
-  bool err = false;
-
-  // rtc in valid state?
-  if ( !isRTCValid() ) {
-    // force rtc to be set from ntp
-    rtcExpiration = EXPIRES_RTCFROMNTP + 1;
-  }
-
-  // update rtc from ntp?
-  if ( rtcExpiration > EXPIRES_RTCFROMNTP ) {
-    if ( setRTCFromNTP() ) {
-      // only reset on success
-      // we will retry next time thru if there was an error
-      rtcExpiration = 0;
-    } else {
-      // show error status on display
-      err = true;
-    }
-  }
-
-  // update screen
-  showTime(err);
-
-  // track when to update rtc from ntp
-  rtcExpiration++;
-
-  // wait
-  delay(1000);
+  // NOP, replaced by core0Loop
 }
 
 // update the RTC from NTP
@@ -108,7 +157,7 @@ bool setRTCFromNTP()
     delay(333);
   }
 
-  // setup time with ntp server
+  // setup time via ntp server
   configTime(0, 0, ntpServer);
 
   // get current date/time from ntp
@@ -130,18 +179,9 @@ bool setRTCFromNTP()
   // don't keep persistent connection
   WiFi.disconnect(true);
 
-  // return based on whether rtc is now valid
-  if ( isRTCValid() ) {
-    return true;
-  }
+  if ( rtc.getDate() != t.tm_mday ) {
+    Serial.println(F("rtc invalid"));
 
-  Serial.println(F("RTC invalid"));
-  return false;
-}
-
-// return true if RTC appears to be in a valid state
-bool isRTCValid() {
-  if ( rtc.getDate() > 31 ) {
     return false;
   }
   return true;
@@ -200,7 +240,7 @@ void showTime(bool err)
     display.setFont(&FreeSans9pt7b);
     drawStringCenter(errorMessage, 119);
   }
-  
+
   display.display();
 }
 
@@ -232,6 +272,6 @@ void showTime(bool err)
 //  display.setFont(&FreeSans9pt7b);
 //  drawStringCenter("XXXXX", 119);
 //
-// 
+//
 //  display.display();
 //}
