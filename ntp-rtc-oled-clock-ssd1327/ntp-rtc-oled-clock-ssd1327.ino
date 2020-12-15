@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <DS3231.h>
 #include <Wire.h>
+#include <esp_task_wdt.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1327.h>
 #include <Fonts/FreeSans9pt7b.h>
@@ -34,8 +35,11 @@ DS3231 rtc;
 #define OLED_RESET -1
 Adafruit_SSD1327 display(128, 128, &SPI, OLED_DC, OLED_RESET, OLED_CS);
 
-// how often to update rtc with ntp, in seconds
+// how often to update rtc from ntp, in seconds
 #define EXPIRES_RTCFROMNTP (24 * 60 * 60 / 3)
+
+// track when to update rtc from ntp
+int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
 
 // in error state?
 volatile bool err = false;
@@ -64,8 +68,8 @@ void setup()
   // create RTC mutex semaphore
   xRTCMutex = xSemaphoreCreateMutex();
   if ( xRTCMutex != NULL ) {
-    xTaskCreatePinnedToCore(core0Loop, "UpdateRTC", 10000, (void*)NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(core1Loop, "DisplayClock", 10000, (void*)NULL, 1, NULL, 1);
+    // seperate task for updating the display
+    xTaskCreatePinnedToCore(cpu0Loop, "DisplayClock", 8192, (void*)NULL, 1, NULL, 0);
   } else {
     Serial.println(F("rtc mutex create failed"));
 
@@ -74,13 +78,42 @@ void setup()
   }
 }
 
-// the first core is responsible for keeping the RTC in-sync with NTP
-void core0Loop(void* p)
+// cpu 0 is responsible for displaying the current time from the RTC
+void cpu0Loop(void* p)
 {
-  int rtcExpiration = EXPIRES_RTCFROMNTP + 1;
+  int lastMinute = 61;
 
+  // subscribe task to watchdog timer
+  esp_task_wdt_add(NULL);
 
-  while ( 1 ) {
+  for ( ;; ) {
+    if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
+      // only update the display if the minute value has changed
+      int m = rtc.getMinute();
+      if ( lastMinute != m ) {
+        // update
+        showTime(err);
+
+        // ready for next check
+        lastMinute = m;
+      }
+
+      xSemaphoreGive(xRTCMutex);
+    }
+
+    // done for a while
+    esp_task_wdt_reset();
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// cpu 1 is responsible for keeping the RTC in-sync with NTP
+void loop()
+{
+  // subscribe task to watchdog timer
+  esp_task_wdt_add(NULL);
+
+  for ( ;; ) {
     // update rtc from ntp?
     if ( rtcExpiration > EXPIRES_RTCFROMNTP ) {
       if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
@@ -103,39 +136,9 @@ void core0Loop(void* p)
     rtcExpiration++;
 
     // done for a while
+    esp_task_wdt_reset();
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
-}
-
-// the second core is responsible for displaying the current time from the RTC
-void core1Loop(void* p)
-{
-  int lastMinute = 61;
-
-
-  while ( 1 ) {
-    if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
-      // only update the display if the minute value has changed
-      int m = rtc.getMinute();
-      if ( lastMinute != m ) {
-        // update
-        showTime(err);
-
-        // ready for next check
-        lastMinute = m;
-      }
-
-      xSemaphoreGive(xRTCMutex);
-    }
-
-    // done for a while
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-}
-
-void loop()
-{
-  // NOP, replaced by core0Loop
 }
 
 // update the RTC from NTP
@@ -149,12 +152,12 @@ bool setRTCFromNTP()
   WiFi.setHostname("stnclk");
   while ( WiFi.status() != WL_CONNECTED ) {
     tries++;
-    if ( tries > 30 ) {
+    if ( tries > 10 ) {
       WiFi.disconnect(true);
       Serial.println(F("Can't get WiFi connection"));
       return false;
     }
-    delay(333);
+    delay(200);
   }
 
   // setup time via ntp server
