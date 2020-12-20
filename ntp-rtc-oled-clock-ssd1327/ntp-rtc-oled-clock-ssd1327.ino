@@ -182,12 +182,13 @@ bool setRTCFromNTP()
   // don't keep persistent connection
   WiFi.disconnect(true);
 
-  if ( rtc.getDate() != t.tm_mday ) {
-    Serial.println(F("rtc invalid"));
-
-    return false;
+  // test whether the time is (likely to be) valid
+  if ( rtc.oscillatorCheck() ) {
+    return true;
   }
-  return true;
+
+  Serial.println(F("rtc invalid"));
+  return false;
 }
 
 // draw string centered across the display
