@@ -1,12 +1,11 @@
 #include <WiFi.h>
-#include <DS3231.h>
 #include <Wire.h>
+#include <RTClib.h>
 #include <esp_task_wdt.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1327.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold24pt7b.h>
-#include "time.h"
 #include "secrets.h"
 
 
@@ -18,7 +17,7 @@ const char* wifiPwd = SECRET_PASS;
 const char* ntpServer = "pool.ntp.org";
 
 // real time clock so we are't slamming the ntp server
-DS3231 rtc;
+RTC_DS3231 rtc;
 
 // ESP32 to OLED SPI
 //
@@ -47,6 +46,10 @@ volatile bool err = false;
 // guard access to the RTC
 SemaphoreHandle_t xRTCMutex = NULL;
 
+// baseline on display
+#define BASE_LINE 31
+
+
 
 void setup()
 {
@@ -55,14 +58,21 @@ void setup()
   // join i2c bus
   Wire.begin();
 
-  // initialize oled display
-  if ( !display.begin() ) {
-    Serial.println(F("display allocation failed"));
+  // initialize rtc
+  if ( !rtc.begin() ) {
+    Serial.println(F("Couldn't find RTC"));
 
     // stall here
     while ( 1 ) yield();
   }
 
+  // initialize oled display
+  if ( !display.begin() ) {
+    Serial.println(F("Display allocation failed"));
+
+    // stall here
+    while ( 1 ) yield();
+  }
   display.setRotation(2);
 
   // create RTC mutex semaphore
@@ -71,7 +81,7 @@ void setup()
     // seperate task for updating the display
     xTaskCreatePinnedToCore(cpu0Loop, "DisplayClock", 8192, (void*)NULL, 1, NULL, 0);
   } else {
-    Serial.println(F("rtc mutex create failed"));
+    Serial.println(F("RTC mutex create failed"));
 
     // stall here
     while ( 1 ) yield();
@@ -81,7 +91,7 @@ void setup()
 // cpu 0 is responsible for displaying the current time from the RTC
 void cpu0Loop(void* p)
 {
-  int lastMinute = 61;
+  int lastMinute = 99;
 
   // subscribe task to watchdog timer
   esp_task_wdt_add(NULL);
@@ -89,7 +99,8 @@ void cpu0Loop(void* p)
   for ( ;; ) {
     if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
       // only update the display if the minute value has changed
-      int m = rtc.getMinute();
+      DateTime now = rtc.now();
+      int m = now.minute();
       if ( lastMinute != m ) {
         // update
         showTime(err);
@@ -118,14 +129,16 @@ void loop()
     if ( rtcExpiration > EXPIRES_RTCFROMNTP ) {
       if ( xSemaphoreTake(xRTCMutex, portMAX_DELAY) == pdTRUE ) {
         if ( setRTCFromNTP() ) {
-          // error status failed
+          // clear error status
           err = false;
 
-          // we will retry next time thru if there was an error
+          // reset
           rtcExpiration = 0;
         } else {
-          // error status success
+          // failed error status
           err = true;
+
+          // don't reset rtcExpiration so we will retry next time thru
         }
 
         xSemaphoreGive(xRTCMutex);
@@ -141,15 +154,17 @@ void loop()
   }
 }
 
+
 // update the RTC from NTP
+// returns true if update was successful
 bool setRTCFromNTP()
 {
   struct tm t;
 
   // connect to wifi to reach ntp server
-  int tries;
   WiFi.begin(wifiSSID, wifiPwd);
   WiFi.setHostname("stnclk");
+  int tries = 0;
   while ( WiFi.status() != WL_CONNECTED ) {
     tries++;
     if ( tries > 10 ) {
@@ -171,24 +186,12 @@ bool setRTCFromNTP()
   }
 
   // update rtc date/time
-  rtc.setClockMode(false);
-  rtc.setYear(t.tm_year % 100);
-  rtc.setMonth(t.tm_mon + 1);
-  rtc.setDate(t.tm_mday);
-  rtc.setHour(t.tm_hour);
-  rtc.setMinute(t.tm_min);
-  rtc.setSecond(t.tm_sec);
+  rtc.adjust(DateTime(t.tm_year % 100, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec));
 
   // don't keep persistent connection
   WiFi.disconnect(true);
 
-  // test whether the time is (likely to be) valid
-  if ( rtc.oscillatorCheck() ) {
-    return true;
-  }
-
-  Serial.println(F("rtc invalid"));
-  return false;
+  return true;
 }
 
 // draw string centered across the display
@@ -209,16 +212,11 @@ void drawStringCenter(const char *buf, const int y)
   display.print(buf);
 }
 
-#define BASE_LINE 31
-
 // draw current date & time on the screen
 void showTime(bool err)
 {
   const static char errorMessage[] PROGMEM = "ERROR";
   const static char* monthNames[] = {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  bool century = false;
-  bool h12Flag;
-  bool pmFlag;
   char b[16];
 
 
@@ -230,14 +228,16 @@ void showTime(bool err)
     drawStringCenter(errorMessage, 20);
   }
 
+  DateTime now = rtc.now();
+
   // draw time
   display.setFont(&FreeSansBold24pt7b);
-  sprintf(b, "%02d:%02d", rtc.getHour(h12Flag, pmFlag), rtc.getMinute());
+  sprintf(b, "%02d:%02d", now.hour(), now.minute());
   drawStringCenter(b, 36 + BASE_LINE);
 
   // draw date
   display.setFont(&FreeSans9pt7b);
-  sprintf(b, "%s. %d, %d", monthNames[rtc.getMonth(century)], rtc.getDate(), rtc.getYear() + 2000);
+  sprintf(b, "%s. %d, %d", monthNames[now.month()], now.day(), now.year());
   drawStringCenter(b, 60 + BASE_LINE);
 
   if ( err ) {
