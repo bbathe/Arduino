@@ -26,10 +26,10 @@ RTC_DS3231 rtc;
 // DIN of OLED -> IO23 (MOSI)
 // CLK of OLED -> IO18 (SCK)
 // CS of OLED -> IO5 (SS)
-// DC of OLED -> IO25
+// DC of OLED -> IO32
 // RST of OLED -> N/A
 
-#define OLED_DC    25
+#define OLED_DC    32
 #define OLED_CS    5
 #define OLED_RESET -1
 Adafruit_SSD1327 display(128, 128, &SPI, OLED_DC, OLED_RESET, OLED_CS);
