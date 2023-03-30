@@ -26,7 +26,7 @@ void setup() {
 
   // initialize 7 segment display
   display.clear();
-  display.setBrightness(7);
+  display.setBrightness(0);
 }
 
 void loop() {
@@ -40,7 +40,7 @@ void loop() {
     if (last_minute != minute) {
       last_minute = minute;
 
-      display.showNumberDecEx((gps.time.hour() << 8) + (gps.time.minute() & 0xff), 0b01000000, true);
+      display.showNumberDecEx(gps.time.hour() * 100 + gps.time.minute(), 0b01000000, true);
     }
   }
 
