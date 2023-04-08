@@ -1,6 +1,18 @@
 #include <RadioLib.h>
 #include <TinyGPS++.h>
 
+struct LocationMessage {
+  uint16_t reading_id;
+  uint16_t reading_sequence;
+  double lat;
+  double lng;
+};
+
+double setPrecision(double n, float i) {
+  return floor(pow(10, i) * n) / pow(10, i);
+}
+
+
 // SX1268 to Xiao SMAD21 connections
 // MOSI pin: 10
 // MISO pin:  9
@@ -19,8 +31,8 @@ TinyGPSPlus gps;
 // last sent readings
 uint16_t last_reading_id;
 uint16_t last_reading_sequence;
-float last_lat;
-float last_lng;
+double last_lat;
+double last_lng;
 
 
 void initializeRadio() {
@@ -45,25 +57,22 @@ void loop() {
     // signify another reading
     last_reading_id = last_reading_id + 1;
     last_reading_sequence = 0;
-    last_lat = (float)gps.location.lat();
-    last_lng = (float)gps.location.lng();
+    last_lat = gps.location.lat();
+    last_lng = gps.location.lng();
   }
 
-  // encode into byte buffer
-  uint8_t data[12];
-  ((uint16_t*)data)[0] = last_reading_id;        // bytes 0, 1
-  ((uint16_t*)data)[1] = last_reading_sequence;  // bytes 2, 3
-  ((float*)data)[1] = last_lat;                  // bytes 4, 5, 6, 7
-  ((float*)data)[2] = last_lng;                  // bytes 8, 9, 10, 11
+  Serial.print(last_reading_id);
+  Serial.print(F("/"));
+  Serial.print(last_reading_sequence);
+  Serial.print(F(": "));
+  Serial.print(last_lat, 10);
+  Serial.print(F(" "));
+  Serial.println(last_lng, 10);
 
-  // for (int i = 0; i < sizeof(data); i++) {
-  //   Serial.print(data[i], HEX);
-  //   Serial.print(" ");
-  // }
-  // Serial.println();
+  LocationMessage payload = { last_reading_id, last_reading_sequence, last_lat, last_lng };
 
   // transmit another reading
-  int status = radio.transmit(data, sizeof(data));
+  int status = radio.transmit((uint8_t*)&payload, sizeof(payload));
   if (status != RADIOLIB_ERR_NONE) {
     Serial.print(F("radio.transmit failed "));
     Serial.println(status);
