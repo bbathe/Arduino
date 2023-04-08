@@ -122,6 +122,11 @@ std::tuple<float, int> radioRecieve(uint8_t* data, size_t len) {
 
   if (xSemaphoreTake(xRadioMutex, portMAX_DELAY) == pdTRUE) {
     status = radio.receive(data, len);
+    if (status != RADIOLIB_ERR_NONE) {
+      Serial.printf("radio.receive failed %d\n", status);
+      xSemaphoreGive(xRadioMutex);
+      return { rssi, status };
+    }
     rssi = radio.getRSSI();
 
     xSemaphoreGive(xRadioMutex);
@@ -135,6 +140,9 @@ int radioTransmit(uint8_t* data, size_t len) {
 
   if (xSemaphoreTake(xRadioMutex, portMAX_DELAY) == pdTRUE) {
     status = radio.transmit(data, len);
+    if (status != RADIOLIB_ERR_NONE) {
+      Serial.printf("radio.transmit failed %d\n", status);
+    }
 
     xSemaphoreGive(xRadioMutex);
   }
@@ -149,9 +157,7 @@ int radioReset() {
     // reset
     status = radio.reset();
     if (status != RADIOLIB_ERR_NONE) {
-      Serial.print(F("radio.begin failed "));
-      Serial.println(status);
-
+      Serial.printf("radio.reset failed %d\n", status);
       xSemaphoreGive(xRadioMutex);
       return status;
     }
@@ -159,9 +165,7 @@ int radioReset() {
     // initialize radio
     status = radio.begin(434.0, 500.0, 12, 8, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 8, 0, false);
     if (status != RADIOLIB_ERR_NONE) {
-      Serial.print(F("radio.begin failed "));
-      Serial.println(status);
-
+      Serial.printf("radio.begin failed %d\n", status);
       xSemaphoreGive(xRadioMutex);
       return status;
     }
@@ -188,31 +192,24 @@ void recieveLocationLoop(void* p) {
       // MOCK
       setOurPosition(payload.position);
 
-      // Serial.print(payload.readingID);
-      // Serial.print(F("/"));
-      // Serial.print(payload.readingSequence);
-      // Serial.print(F(": "));
-      // Serial.print(payload.position.lat, 10);
-      // Serial.print(F(" "));
-      // Serial.print(payload.position.lng, 10);
-      // Serial.print(F(" "));
-      // Serial.print(distance, 6);
-      // Serial.print(F(" "));
+      // Serial.printf("%d / %d: %0.6f %0.6f ",
+      //               payload.readingID,
+      //               payload.readingSequence,
+      //               setPrecision(payload.position.lat, 6),
+      //               setPrecision(payload.position.lng, 6));
 
-      if (payload.readingSequence == 0) {
-        Serial.print(F("+ "));
-      } else {
-        Serial.print(F("- "));
-      }
-      Serial.print(setPrecision(distance, 0), 0);
-      Serial.print(F(" "));
-      Serial.println(rssi, 0);
+      Serial.printf("%s %0.0f %0.0f\n",
+                    (payload.readingSequence == 0 ? "+" : "-"),
+                    setPrecision(distance, 0),
+                    rssi);
     } else if (statusRadio != RADIOLIB_ERR_RX_TIMEOUT) {
-      Serial.print(F("radio.receive failed "));
-      Serial.println(statusRadio);
+      Serial.printf("radioRecieve failed %d\n", statusRadio);
 
       // reset radio on any unexpected failure
-      radioReset();
+      statusRadio = radioReset();
+      if (statusRadio != RADIOLIB_ERR_NONE) {
+        Serial.printf("radioReset failed %d\n", statusRadio);
+      }
     }
 
     // done for a while
@@ -250,11 +247,13 @@ void sendLocationLoop(void* p) {
     // transmit another reading
     statusRadio = radioTransmit((uint8_t*)&payload, sizeof(payload));
     if (statusRadio != RADIOLIB_ERR_NONE) {
-      Serial.print(F("radio.transmit failed "));
-      Serial.println(statusRadio);
+      Serial.printf("radioTransmit failed %d\n", statusRadio);
 
       // reset radio on any unexpected failure
-      radioReset();
+      statusRadio = radioReset();
+      if (statusRadio != RADIOLIB_ERR_NONE) {
+        Serial.printf("radioReset failed %d\n", statusRadio);
+      }
     }
 
     // done for a while
