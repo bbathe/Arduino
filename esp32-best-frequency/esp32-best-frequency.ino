@@ -4,7 +4,9 @@
 #include <TM1637Display.h>
 #include "secrets.h"
 
-TM1637Display display0 = TM1637Display(23, 22);
+// sharing pins with multiple displays
+// https://esphome.io/components/display/tm1637.html#connect-multiple-displays
+TM1637Display display0 = TM1637Display(32, 33);
 TM1637Display display1 = TM1637Display(33, 32);
 
 const uint8_t err[] = {
@@ -72,7 +74,9 @@ void cpu0Loop(void* p) {
       HTTPClient http;
       http.setTimeout(5000);
 
-      http.begin("https://pskreporter.info/cgi-bin/psk-freq.pl?grid=EM79");
+      String url = String("https://pskreporter.info/cgi-bin/psk-freq.pl?grid=");
+      url += SECRET_GRID_SQUARE_4;
+      http.begin(url);
 
       int httpCode = http.GET();
       if (httpCode == HTTP_CODE_OK) {
@@ -138,7 +142,11 @@ void cpu1Loop(void* p) {
       HTTPClient http;
       http.setTimeout(5000);
 
-      http.begin("https://prop.kc2g.com/api/ptp.json?from_grid=EM79vl&to_grid=EM79vl");
+      String url = String("https://prop.kc2g.com/api/ptp.json?from_grid=");
+      url += SECRET_GRID_SQUARE_6;
+      url += "&to_grid=";
+      url += SECRET_GRID_SQUARE_6;
+      http.begin(url);
 
       int httpCode = http.GET();
       if (httpCode == HTTP_CODE_OK) {

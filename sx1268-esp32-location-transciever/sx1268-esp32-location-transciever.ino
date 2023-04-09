@@ -1,5 +1,7 @@
 #include <esp_task_wdt.h>
 #include <RadioLib.h>
+#include <TinyGPS++.h>
+#include <TM1637Display.h>
 
 struct Position {
   double lat;
@@ -12,23 +14,29 @@ struct LocationMessage {
   Position position;
 };
 
-double setPrecision(double n, float i) {
-  return floor(pow(10, i) * n) / pow(10, i);
-}
+// return segments to display on 7 segment for course
+// refactored from TinyGPS++ cardinal method
+const uint8_t* cardinalCourse7Segment(double course) {
+  static const uint8_t directions[][4] = {
+    { 0, 0, 0, SEG_C | SEG_E | SEG_G },                                                                                                          // n
+    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                  // nnE
+    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                      // nE
+    { 0, 0, 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                          // E
+    { 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // ESE
+    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                      // SE
+    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // SSE
+    { 0, 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G },                                                                                          // S
+    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },          // SSW
+    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                              // SW
+    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },  // WSW
+    { 0, 0, 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                  // W
+    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                  // WnW
+    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                              // nW
+    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G }                                           // nnW
+  };
 
-// returns the great-circle distance (in yards) between two points on the globe
-// lat1, lat2, lon1, lon2 must be provided in degrees
-double haversine(double lat1, double lon1, double lat2, double lon2) {
-  const double rEarth = 6967410.3237095;  // yards
-
-  double x = pow(sin(((lat2 - lat1) * M_PI / 180.0) / 2.0), 2.0);
-  double y = cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0);
-  double z = pow(sin(((lon2 - lon1) * M_PI / 180.0) / 2.0), 2.0);
-  double a = x + y * z;
-  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-  double d = rEarth * c;
-
-  return d;
+  int direction = (int)((course + 11.25f) / 22.5f);
+  return directions[direction % 16];
 }
 
 // SX1268 to EzSBC ESP32 Dev Board connections
@@ -40,6 +48,11 @@ double haversine(double lat1, double lon1, double lat2, double lon2) {
 // RST pin:  21
 // BUSY pin: 27
 SX1268 radio = new Module(5, 22, 21, 27);
+
+// GT-U7 to EzSBC ESP32 Dev Board connections
+// TXD pin: ?
+// RXD pin: ?
+TinyGPSPlus gps;
 
 // our last known position
 Position ourPosition;
@@ -187,7 +200,8 @@ void recieveLocationLoop(void* p) {
     if (statusRadio == RADIOLIB_ERR_NONE) {
       Position position = getOurPosition();
 
-      double distance = haversine(position.lat, position.lng, payload.position.lat, payload.position.lng);
+      double distance = gps.distanceBetween(position.lat, position.lng, payload.position.lat, payload.position.lng);
+      double course = gps.courseTo(position.lat, position.lng, payload.position.lat, payload.position.lng);
 
       // MOCK
       setOurPosition(payload.position);
@@ -195,13 +209,13 @@ void recieveLocationLoop(void* p) {
       // Serial.printf("%d / %d: %0.6f %0.6f ",
       //               payload.readingID,
       //               payload.readingSequence,
-      //               setPrecision(payload.position.lat, 6),
-      //               setPrecision(payload.position.lng, 6));
+      //               payload.position.lat,
+      //               payload.position.lng);
 
-      Serial.printf("%s %0.0f %0.0f\n",
+      Serial.printf("%s %d %d\n",
                     (payload.readingSequence == 0 ? "+" : "-"),
-                    setPrecision(distance, 0),
-                    rssi);
+                    (int)(distance * 3.28084),
+                    (int)rssi);
     } else if (statusRadio != RADIOLIB_ERR_RX_TIMEOUT) {
       Serial.printf("radioRecieve failed %d\n", statusRadio);
 
