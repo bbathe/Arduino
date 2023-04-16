@@ -6,8 +6,9 @@
 
 // sharing pins with multiple displays
 // https://esphome.io/components/display/tm1637.html#connect-multiple-displays
-TM1637Display display0 = TM1637Display(32, 33);
-TM1637Display display1 = TM1637Display(33, 32);
+TM1637Display display0 = TM1637Display(23, 32);
+TM1637Display display1 = TM1637Display(32, 33);
+TM1637Display display2 = TM1637Display(33, 23);
 
 const uint8_t err[] = {
   0,                                      // blank
@@ -23,7 +24,33 @@ const uint8_t dash[] = {
   SEG_G,  // -
 };
 
+// return segments to display on 7 segment for course
+// refactored from TinyGPS++ cardinal method
+const uint8_t* cardinalCourse7Segment(double course) {
+  static const uint8_t directions[][4] = {
+    { 0, 0, 0, SEG_C | SEG_E | SEG_G },                                                                                                          // n
+    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                  // nnE
+    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                      // nE
+    { 0, 0, 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                          // E
+    { 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // ESE
+    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                      // SE
+    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // SSE
+    { 0, 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G },                                                                                          // S
+    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },          // SSW
+    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                              // SW
+    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },  // WSW
+    { 0, 0, 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                  // W
+    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                  // WnW
+    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                              // nW
+    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G }                                           // nnW
+  };
 
+  int direction = (int)((course + 11.25f) / 22.5f);
+  return directions[direction % 16];
+}
+
+// guard access to the displays
+SemaphoreHandle_t xDisplayMutex;
 
 void setup() {
   Serial.begin(9600);
@@ -38,6 +65,19 @@ void setup() {
   display1.clear();
   display1.setBrightness(0);
   display1.setSegments(dash);
+  display2.clear();
+  display2.setBrightness(0);
+  display2.setSegments(dash);
+
+  // create mutexes
+  xDisplayMutex = xSemaphoreCreateMutex();
+  if (xDisplayMutex == NULL) {
+    Serial.println(F("display mutex create failed"));
+    display0.setSegments(err);
+    display1.setSegments(err);
+    display2.setSegments(err);
+    while (1) yield();
+  }
 
   // wifi
   WiFi.disconnect();
@@ -54,7 +94,42 @@ void setup() {
   xTaskCreatePinnedToCore(cpu1Loop, "MUF", 8192, (void*)NULL, 1, NULL, 1);
 }
 
-void loop() {}
+// display.setSegments protected by xDisplayMutex
+void setDisplaySegments(TM1637Display display, const uint8_t segments[]) {
+  if (xSemaphoreTake(xDisplayMutex, portMAX_DELAY) == pdTRUE) {
+    display.setSegments(segments);
+    xSemaphoreGive(xDisplayMutex);
+  }
+}
+
+// display.showNumberDec protected by xDisplayMutex
+void setDisplayShowNumberDec(TM1637Display display, int num) {
+  if (xSemaphoreTake(xDisplayMutex, portMAX_DELAY) == pdTRUE) {
+    display.showNumberDec(num);
+    xSemaphoreGive(xDisplayMutex);
+  }
+}
+
+// display.setBrightness protected by xDisplayMutex
+void setDisplaySetBrightness(TM1637Display display, uint8_t brightness) {
+  if (xSemaphoreTake(xDisplayMutex, portMAX_DELAY) == pdTRUE) {
+    display.setBrightness(brightness);
+    xSemaphoreGive(xDisplayMutex);
+  }
+}
+
+double course = 0;
+
+void loop() {
+  course++;
+  if (course >= 360.0) {
+    course = 0;
+  }
+
+  setDisplaySegments(display2, cardinalCourse7Segment(course));
+
+  delay(1000);
+}
 
 
 
@@ -104,12 +179,13 @@ void cpu0Loop(void* p) {
         if (bestFreq != lastBestFreq) {
           lastBestFreq = bestFreq;
           rampDisplay = true;
-          display0.setBrightness(7);
-          display0.showNumberDec(lastBestFreq);
+
+          setDisplaySetBrightness(display0, 7);
+          setDisplayShowNumberDec(display0, lastBestFreq);
         }
 
       } else {
-        display0.setSegments(err);
+        setDisplaySegments(display0, err);
         Serial.printf("httpCode %d: %s\n", httpCode, http.errorToString(httpCode).c_str());
       }
 
@@ -120,8 +196,8 @@ void cpu0Loop(void* p) {
     esp_task_wdt_reset();
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     if (rampDisplay) {
-      display0.setBrightness(0);
-      display0.showNumberDec(lastBestFreq);
+      setDisplaySetBrightness(display0, 0);
+      setDisplayShowNumberDec(display0, lastBestFreq);
     }
   }
 }
@@ -161,12 +237,12 @@ void cpu1Loop(void* p) {
         if (Muf != lastMuf) {
           lastMuf = Muf;
           rampDisplay = true;
-          display1.setBrightness(7);
-          display1.showNumberDec(lastMuf);
+          setDisplaySetBrightness(display1, 7);
+          setDisplayShowNumberDec(display1, lastMuf);
         }
 
       } else {
-        display1.setSegments(err);
+        setDisplaySegments(display1, err);
         Serial.printf("httpCode %d: %s\n", httpCode, http.errorToString(httpCode).c_str());
       }
 
@@ -177,8 +253,8 @@ void cpu1Loop(void* p) {
     esp_task_wdt_reset();
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     if (rampDisplay) {
-      display1.setBrightness(0);
-      display1.showNumberDec(lastMuf);
+      setDisplaySetBrightness(display1, 0);
+      setDisplayShowNumberDec(display1, lastMuf);
     }
   }
 }

@@ -50,8 +50,8 @@ const uint8_t* cardinalCourse7Segment(double course) {
 SX1268 radio = new Module(5, 22, 21, 27);
 
 // GT-U7 to EzSBC ESP32 Dev Board connections
-// TXD pin: ?
-// RXD pin: ?
+// TXD pin: 16
+// RXD pin: 17
 TinyGPSPlus gps;
 
 // our last known position
@@ -63,6 +63,7 @@ SemaphoreHandle_t xPositionMutex;
 
 void setup() {
   Serial.begin(9600);
+  Serial2.begin(9600, SERIAL_8N1, 16, 17);
 
   // create mutexes
   xRadioMutex = xSemaphoreCreateMutex();
@@ -73,6 +74,12 @@ void setup() {
   xPositionMutex = xSemaphoreCreateMutex();
   if (xPositionMutex == NULL) {
     Serial.println(F("position mutex create failed"));
+    while (1) yield();
+  }
+
+  // initialize radio
+  if (radioReset() != RADIOLIB_ERR_NONE) {
+    Serial.println(F("radio initialization failed"));
     while (1) yield();
   }
 
@@ -89,12 +96,6 @@ void setup() {
   // initialize watchdog timer
   if (esp_task_wdt_init(10, true) != ESP_OK) {
     Serial.println(F("TWDT initialization failed"));
-    while (1) yield();
-  }
-
-  // initialize radio
-  if (radioReset() != RADIOLIB_ERR_NONE) {
-    Serial.println(F("radio initialization failed"));
     while (1) yield();
   }
 }
@@ -136,7 +137,6 @@ std::tuple<float, int> radioRecieve(uint8_t* data, size_t len) {
   if (xSemaphoreTake(xRadioMutex, portMAX_DELAY) == pdTRUE) {
     status = radio.receive(data, len);
     if (status != RADIOLIB_ERR_NONE) {
-      Serial.printf("radio.receive failed %d\n", status);
       xSemaphoreGive(xRadioMutex);
       return { rssi, status };
     }
@@ -203,17 +203,11 @@ void recieveLocationLoop(void* p) {
       double distance = gps.distanceBetween(position.lat, position.lng, payload.position.lat, payload.position.lng);
       double course = gps.courseTo(position.lat, position.lng, payload.position.lat, payload.position.lng);
 
-      // MOCK
-      setOurPosition(payload.position);
-
-      // Serial.printf("%d / %d: %0.6f %0.6f ",
-      //               payload.readingID,
-      //               payload.readingSequence,
-      //               payload.position.lat,
-      //               payload.position.lng);
-
-      Serial.printf("%s %d %d\n",
-                    (payload.readingSequence == 0 ? "+" : "-"),
+      Serial.printf("RECIEVED %d / %d: %0.6f %0.6f %d %d\n",
+                    payload.readingID,
+                    payload.readingSequence,
+                    payload.position.lat,
+                    payload.position.lng,
                     (int)(distance * 3.28084),
                     (int)rssi);
     } else if (statusRadio != RADIOLIB_ERR_RX_TIMEOUT) {
@@ -226,7 +220,6 @@ void recieveLocationLoop(void* p) {
       }
     }
 
-    // done for a while
     esp_task_wdt_reset();
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
@@ -243,20 +236,30 @@ void sendLocationLoop(void* p) {
     LocationMessage payload;
     int statusRadio;
 
-    lastReadingSequence = lastReadingSequence + 1;
-    // if (gps.location.isValid() && gps.location.isUpdated()) {
-    //   // signify another reading
-    //   lastReadingID = lastReadingID + 1;
-    //   lastReadingSequence = 0;
-    //   setOurPosition({ gps.location.lat(), gps.location.lng() });
-    // }
+    while (Serial2.available() > 0) {
+      gps.encode(Serial2.read());
+    }
 
-    // MOCK
-    lastReadingID = lastReadingID + 1;
-    lastReadingSequence = 0;
+    Position position;
+    if (gps.location.isValid() && gps.location.isUpdated()) {
+      // got another reading
+      lastReadingID = lastReadingID + 1;
+      lastReadingSequence = 0;
+      position = { gps.location.lat(), gps.location.lng() };
+      setOurPosition(position);
+    } else {
+      // no new reading
+      lastReadingSequence = lastReadingSequence + 1;
+      position = getOurPosition();
+    }
 
-    Position position = getOurPosition();
     payload = { lastReadingID, lastReadingSequence, position.lat, position.lng };
+
+    Serial.printf("SENDING %d / %d: %0.6f %0.6f\n",
+                  payload.readingID,
+                  payload.readingSequence,
+                  payload.position.lat,
+                  payload.position.lng);
 
     // transmit another reading
     statusRadio = radioTransmit((uint8_t*)&payload, sizeof(payload));
@@ -270,7 +273,6 @@ void sendLocationLoop(void* p) {
       }
     }
 
-    // done for a while
     esp_task_wdt_reset();
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
