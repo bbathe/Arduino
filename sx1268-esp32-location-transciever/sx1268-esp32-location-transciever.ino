@@ -3,41 +3,19 @@
 #include <TinyGPS++.h>
 #include <TM1637Display.h>
 
+#define DEBUG false
+#define Serial \
+  if (DEBUG) Serial
+
 struct Position {
   double lat;
   double lng;
 };
 
 struct LocationMessage {
-  uint16_t readingID;
-  uint16_t readingSequence;
+  char type[4];  // 'HELO' or 'GBYE'
   Position position;
 };
-
-// return segments to display on 7 segment for course
-// refactored from TinyGPS++ cardinal method
-const uint8_t* cardinalCourse7Segment(double course) {
-  static const uint8_t directions[][4] = {
-    { 0, 0, 0, SEG_C | SEG_E | SEG_G },                                                                                                          // n
-    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                  // nnE
-    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                      // nE
-    { 0, 0, 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                          // E
-    { 0, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // ESE
-    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                                                      // SE
-    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_D | SEG_E | SEG_F | SEG_G },                  // SSE
-    { 0, 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G },                                                                                          // S
-    { 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },          // SSW
-    { 0, 0, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                              // SW
-    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_A | SEG_C | SEG_D | SEG_F | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },  // WSW
-    { 0, 0, 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                                                  // W
-    { 0, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                  // WnW
-    { 0, 0, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G },                                                              // nW
-    { 0, SEG_C | SEG_E | SEG_G, SEG_C | SEG_E | SEG_G, SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G }                                           // nnW
-  };
-
-  int direction = (int)((course + 11.25f) / 22.5f);
-  return directions[direction % 16];
-}
 
 // SX1268 to EzSBC ESP32 Dev Board connections
 // MOSI pin: 23
@@ -54,6 +32,31 @@ SX1268 radio = new Module(5, 22, 21, 27);
 // RXD pin: 17
 TinyGPSPlus gps;
 
+// Button to EzSBC ESP32 Dev Board connections
+// Button: 13
+#define SEND_BUTTON 13
+
+// sharing pins with multiple displays
+// https://esphome.io/components/display/tm1637.html#connect-multiple-displays
+TM1637Display displayDistance = TM1637Display(32, 33);
+TM1637Display displayRSSI = TM1637Display(33, 32);
+
+const uint8_t err[] = {
+  0,                                      // blank
+  SEG_A | SEG_D | SEG_E | SEG_F | SEG_G,  // E
+  SEG_E | SEG_G,                          // r
+  SEG_E | SEG_G,                          // r
+};
+
+const uint8_t dash[] = {
+  SEG_G,  // -
+  SEG_G,  // -
+  SEG_G,  // -
+  SEG_G,  // -
+};
+
+
+
 // our last known position
 Position ourPosition;
 
@@ -65,37 +68,59 @@ void setup() {
   Serial.begin(9600);
   Serial2.begin(9600, SERIAL_8N1, 16, 17);
 
+  pinMode(SEND_BUTTON, INPUT_PULLUP);
+
+  // displays
+  displayDistance.clear();
+  displayDistance.setBrightness(0);
+  displayDistance.setSegments(dash);
+  displayRSSI.clear();
+  displayRSSI.setBrightness(0);
+  displayRSSI.setSegments(dash);
+
   // create mutexes
   xRadioMutex = xSemaphoreCreateMutex();
   if (xRadioMutex == NULL) {
     Serial.println(F("radio mutex create failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
     while (1) yield();
   }
   xPositionMutex = xSemaphoreCreateMutex();
   if (xPositionMutex == NULL) {
     Serial.println(F("position mutex create failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
     while (1) yield();
   }
 
   // initialize radio
   if (radioReset() != RADIOLIB_ERR_NONE) {
     Serial.println(F("radio initialization failed"));
-    while (1) yield();
-  }
-
-  // create tasks
-  if (xTaskCreatePinnedToCore(sendLocationLoop, "SendLocation", 8192, (void*)NULL, 1, NULL, 0) != pdPASS) {
-    Serial.println(F("SendLocation task create failed"));
-    while (1) yield();
-  }
-  if (xTaskCreatePinnedToCore(recieveLocationLoop, "RecieveLocation", 8192, (void*)NULL, 1, NULL, 1) != pdPASS) {
-    Serial.println(F("RecieveLocation task create failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
     while (1) yield();
   }
 
   // initialize watchdog timer
   if (esp_task_wdt_init(10, true) != ESP_OK) {
     Serial.println(F("TWDT initialization failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
+    while (1) yield();
+  }
+
+  // create tasks
+  if (xTaskCreatePinnedToCore(sendLocationLoop, "SendLocation", 8192, (void*)NULL, 1, NULL, 0) != pdPASS) {
+    Serial.println(F("SendLocation task create failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
+    while (1) yield();
+  }
+  if (xTaskCreatePinnedToCore(recieveLocationLoop, "RecieveLocation", 8192, (void*)NULL, 1, NULL, 1) != pdPASS) {
+    Serial.println(F("RecieveLocation task create failed"));
+    displayDistance.setSegments(err);
+    displayRSSI.setSegments(err);
     while (1) yield();
   }
 }
@@ -176,7 +201,7 @@ int radioReset() {
     }
 
     // initialize radio
-    status = radio.begin(434.0, 500.0, 12, 8, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 8, 0, false);
+    status = radio.begin(434.0, 500.0, 12, 8, 0x73, 10, 8, 0, false);
     if (status != RADIOLIB_ERR_NONE) {
       Serial.printf("radio.begin failed %d\n", status);
       xSemaphoreGive(xRadioMutex);
@@ -188,28 +213,81 @@ int radioReset() {
   return status;
 }
 
+int sendOurPosition(char* type) {
+  // populate payload
+  LocationMessage payload = { .position = getOurPosition() };
+  memcpy(&payload.type, type, sizeof(payload.type));
+
+  Serial.printf("SENDING %s %0.6f %0.6f\n",
+                payload.type,
+                payload.position.lat,
+                payload.position.lng);
+
+  // transmit reading
+  int statusRadio = radioTransmit((uint8_t*)&payload, sizeof(payload));
+  if (statusRadio != RADIOLIB_ERR_NONE) {
+    Serial.printf("radioTransmit failed %d\n", statusRadio);
+
+    // reset radio on any unexpected failure
+    statusRadio = radioReset();
+    if (statusRadio != RADIOLIB_ERR_NONE) {
+      Serial.printf("radioReset failed %d\n", statusRadio);
+    }
+  }
+  return statusRadio;
+}
+
 void recieveLocationLoop(void* p) {
   // subscribe task to watchdog timer
   esp_task_wdt_add(NULL);
 
   for (;;) {
+    // receive a reading
     LocationMessage payload;
-
-    // receive another reading
     auto [rssi, statusRadio] = radioRecieve((uint8_t*)&payload, sizeof(payload));
     if (statusRadio == RADIOLIB_ERR_NONE) {
-      Position position = getOurPosition();
-
-      double distance = gps.distanceBetween(position.lat, position.lng, payload.position.lat, payload.position.lng);
-      double course = gps.courseTo(position.lat, position.lng, payload.position.lat, payload.position.lng);
-
-      Serial.printf("RECIEVED %d / %d: %0.6f %0.6f %d %d\n",
-                    payload.readingID,
-                    payload.readingSequence,
+      Serial.printf("RECIEVED %s %0.6f %0.6f\n",
+                    payload.type,
                     payload.position.lat,
-                    payload.position.lng,
-                    (int)(distance * 3.28084),
+                    payload.position.lng);
+
+      Position position = getOurPosition();
+      double distance = gps.distanceBetween(position.lat, position.lng, payload.position.lat, payload.position.lng) * 3.28084;
+
+      Serial.printf("CALCULATED %d %d\n",
+                    (int)distance,
                     (int)rssi);
+
+
+      displayDistance.setBrightness(7);
+      displayRSSI.setBrightness(7);
+      if (distance > 9999.0) {
+        displayDistance.setSegments(dash);
+      } else {
+        displayDistance.showNumberDec((int)distance);
+      }
+      displayRSSI.showNumberDec((int)rssi);
+
+      if (memcmp(payload.type, "HELO", sizeof(payload.type)) == 0) {
+        // respond with our position, end conversation
+        int statusRadio = sendOurPosition("GBYE");
+        if (statusRadio != RADIOLIB_ERR_NONE) {
+          Serial.printf("sendOurPosition failed %d\n", statusRadio);
+        }
+      }
+
+      esp_task_wdt_reset();
+      vTaskDelay(500 / portTICK_PERIOD_MS);
+
+      displayDistance.setBrightness(0);
+      displayRSSI.setBrightness(0);
+      if (distance > 9999.0) {
+        displayDistance.setSegments(dash);
+      } else {
+        displayDistance.showNumberDec((int)distance);
+      }
+      displayRSSI.showNumberDec((int)rssi);
+
     } else if (statusRadio != RADIOLIB_ERR_RX_TIMEOUT) {
       Serial.printf("radioRecieve failed %d\n", statusRadio);
 
@@ -221,59 +299,42 @@ void recieveLocationLoop(void* p) {
     }
 
     esp_task_wdt_reset();
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
 void sendLocationLoop(void* p) {
-  uint16_t lastReadingID;
-  uint16_t lastReadingSequence;
+  int lastButtonState = LOW;
+
 
   // subscribe task to watchdog timer
   esp_task_wdt_add(NULL);
 
   for (;;) {
-    LocationMessage payload;
-    int statusRadio;
-
+    // feed gps
     while (Serial2.available() > 0) {
       gps.encode(Serial2.read());
     }
 
-    Position position;
+    // update our location
     if (gps.location.isValid() && gps.location.isUpdated()) {
-      // got another reading
-      lastReadingID = lastReadingID + 1;
-      lastReadingSequence = 0;
-      position = { gps.location.lat(), gps.location.lng() };
-      setOurPosition(position);
-    } else {
-      // no new reading
-      lastReadingSequence = lastReadingSequence + 1;
-      position = getOurPosition();
+      setOurPosition({ .lat = gps.location.lat(), .lng = gps.location.lng() });
     }
 
-    payload = { lastReadingID, lastReadingSequence, position.lat, position.lng };
+    // read the state of the button
+    int currentButtonState = digitalRead(SEND_BUTTON);
+    if (lastButtonState == HIGH && currentButtonState == LOW) {
+      displayDistance.clear();
+      displayRSSI.clear();
 
-    Serial.printf("SENDING %d / %d: %0.6f %0.6f\n",
-                  payload.readingID,
-                  payload.readingSequence,
-                  payload.position.lat,
-                  payload.position.lng);
-
-    // transmit another reading
-    statusRadio = radioTransmit((uint8_t*)&payload, sizeof(payload));
-    if (statusRadio != RADIOLIB_ERR_NONE) {
-      Serial.printf("radioTransmit failed %d\n", statusRadio);
-
-      // reset radio on any unexpected failure
-      statusRadio = radioReset();
+      // send with our position, start conversation
+      int statusRadio = sendOurPosition("HELO");
       if (statusRadio != RADIOLIB_ERR_NONE) {
-        Serial.printf("radioReset failed %d\n", statusRadio);
+        Serial.printf("sendOurPosition failed %d\n", statusRadio);
       }
     }
 
+    lastButtonState = currentButtonState;
     esp_task_wdt_reset();
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
