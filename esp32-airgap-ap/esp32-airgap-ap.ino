@@ -8,17 +8,21 @@
 #define Serial \
   if (DEBUG) Serial
 
+
 // web server
 WebServer server(80);
 
-
-// display
+// SSD1309 display to EzSBC ESP32 Dev Board connections
+// SCK: 18
+// SDA: 23
+//  CS:  5
+//  DC:  4
+// RES: 22
 U8G2_SSD1309_128X64_NONAME0_1_4W_HW_SPI u8g2(U8G2_R0, 5, 4, 22);
 U8G2LOG u8g2log;
 #define U8LOG_WIDTH 25
 #define U8LOG_HEIGHT 8
 uint8_t u8log_buffer[U8LOG_WIDTH * U8LOG_HEIGHT];
-
 
 // toggle button with debounce logic to turn on/off display powersave
 // Button to EzSBC ESP32 Dev Board connections
@@ -36,6 +40,15 @@ void WiFiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_READY:
       u8g2log.printf("WiFi ready\n");
+      break;
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:
+      u8g2log.printf("Scan done\n");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_START:
+      u8g2log.printf("Client started\n");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+      u8g2log.printf("Client stopped\n");
       break;
     case ARDUINO_EVENT_WIFI_AP_START:
       u8g2log.printf("AP started\n");
@@ -55,6 +68,7 @@ void WiFiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
       u8g2log.printf("Client IP %s\n", buf);
       break;
     default:
+      u8g2log.printf("WiFi event %d\n", event);
       break;
   }
 }
@@ -157,7 +171,7 @@ void handleClients() {
   if (tcpip_sta_list.num == 0) {
     body = "no clients connected\n";
   } else {
-    char line[255];
+    char line[64];
     char mac[32];
     char ip[32];
 
@@ -170,7 +184,6 @@ void handleClients() {
       sprintf(mac, MACSTR, MAC2STR(station.mac));
       sprintf(ip, IPSTR, IP2STR(&station.ip));
       sprintf(line, "%-20s%s\n", mac, ip);
-
       body += line;
     }
   }
@@ -202,12 +215,12 @@ void setup() {
   u8g2log.setRedrawMode(0);
 
   // start Wifi
+  WiFi.onEvent(WiFiEventHandler);
   WiFi.useStaticBuffers(true);
 
   int channel = findFreeChannel();
-  u8g2log.printf("AP channel %d\n", channel);
+  u8g2log.printf("AP using channel %d\n", channel);
 
-  WiFi.onEvent(WiFiEventHandler);
   if (!WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, channel)) {
     u8g2log.printf("AP creation failed\n");
     while (1)
@@ -215,7 +228,9 @@ void setup() {
   }
 
   u8g2log.printf("AP IP %s\n", WiFi.softAPIP().toString().c_str());
+  u8g2log.printf("%s %s\n", WIFI_SSID, WIFI_PASSWORD);
 
+  // start http server
   server.on("/clients", handleClients);
   server.onNotFound(handleNotFound);
   server.begin();
